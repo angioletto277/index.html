@@ -1,0 +1,251 @@
+<!DOCTYPE html>
+<html lang="it">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Agente Fatture</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.2/babel.min.js"></script>
+  <style>* { box-sizing: border-box; margin: 0; padding: 0; }</style>
+</head>
+<body>
+  <div id="root"></div>
+  <script type="text/babel">
+
+    // ⬇️ INSERISCI QUI LA TUA API KEY
+    const API_KEY = "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";
+
+    const DIRECTOR = { nome: "Enrico Tosco", email: "e.tosco@reting.it" };
+
+    const EXTRACT_PROMPT = `Estrai i dati aziendali dal testo/documento seguente e rispondi SOLO con un oggetto JSON valido, senza markdown, senza backtick, senza testo aggiuntivo. Usa null per i campi non trovati.
+Schema JSON:
+{
+  "ragione_sociale": "...",
+  "indirizzo": "...",
+  "piva_cf": "...",
+  "codice_sdi": "...",
+  "pec": "...",
+  "note": "..."
+}`;
+
+    function App() {
+      const [dirForm, setDirForm] = React.useState(DIRECTOR);
+      const [input, setInput] = React.useState("");
+      const [file, setFile] = React.useState(null);
+      const [fileName, setFileName] = React.useState("");
+      const [extracted, setExtracted] = React.useState(null);
+      const [email, setEmail] = React.useState(null);
+      const [loading, setLoading] = React.useState(false);
+      const [step, setStep] = React.useState("input");
+      const [error, setError] = React.useState(null);
+      const [copied, setCopied] = React.useState(false);
+      const fileRef = React.useRef();
+
+      const handleFile = (e) => {
+        const f = e.target.files[0];
+        if (!f) return;
+        setFile(f); setFileName(f.name); setInput("");
+      };
+
+      const toBase64 = (f) => new Promise((res, rej) => {
+        const r = new FileReader();
+        r.onload = () => res(r.result.split(",")[1]);
+        r.onerror = rej;
+        r.readAsDataURL(f);
+      });
+
+      const callClaude = async (messages) => {
+        const res = await fetch("https://api.anthropic.com/v1/messages", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "x-api-key": API_KEY,
+            "anthropic-version": "2023-06-01"
+          },
+          body: JSON.stringify({ model: "claude-sonnet-4-20250514", max_tokens: 1000, messages }),
+        });
+        const data = await res.json();
+        return data.content?.map(b => b.text || "").join("\n") || "";
+      };
+
+      const extractData = async () => {
+        if (!input.trim() && !file) { setError("Inserisci un testo o carica un file."); return; }
+        setError(null); setLoading(true);
+        try {
+          let messages;
+          if (file) {
+            const b64 = await toBase64(file);
+            const isImg = file.type.startsWith("image/");
+            const contentBlock = isImg
+              ? { type: "image", source: { type: "base64", media_type: file.type, data: b64 } }
+              : { type: "document", source: { type: "base64", media_type: "application/pdf", data: b64 } };
+            messages = [{ role: "user", content: [contentBlock, { type: "text", text: EXTRACT_PROMPT }] }];
+          } else {
+            messages = [{ role: "user", content: `${EXTRACT_PROMPT}\n\nTESTO:\n${input}` }];
+          }
+          const text = await callClaude(messages);
+          const clean = text.replace(/```json|```/g, "").trim();
+          setExtracted(JSON.parse(clean));
+          setStep("review");
+        } catch (e) { setError("Errore nell'estrazione. Riprova."); }
+        setLoading(false);
+      };
+
+      const generateEmail = async () => {
+        if (!dirForm.nome) { setError("Inserisci il nome del direttore."); return; }
+        setError(null); setLoading(true);
+        const prompt = `Scrivi un'email in italiano per richiedere l'emissione di una fattura.
+Contesto: sono un intermediario che passa i dati dell'azienda cliente al direttore che emette la fattura. Ho un rapporto confidenziale con il direttore.
+Stile: informale ma diretto. Niente convenevoli formali all'inizio, niente saluti finali a nome dell'azienda cliente. Vai dritto al punto.
+Dati:
+- Ragione sociale: ${extracted.ragione_sociale || "N/D"}
+- Indirizzo: ${extracted.indirizzo || "N/D"}
+- P.IVA / CF: ${extracted.piva_cf || "N/D"}
+- Codice SDI: ${extracted.codice_sdi || "N/D"}
+- PEC: ${extracted.pec || ""}
+- Importo: ${extracted.note || "da definire"}
+Formato ESATTO:
+OGGETTO: Richiesta Fattura
+CORPO:
+...`;
+        try {
+          const text = await callClaude([{ role: "user", content: prompt }]);
+          const objMatch = text.match(/OGGETTO:\s*(.+)/i);
+          const bodyMatch = text.match(/CORPO:\s*([\s\S]+)/i);
+          setEmail({
+            subject: objMatch ? objMatch[1].trim() : "Richiesta Fattura",
+            body: bodyMatch ? bodyMatch[1].trim() : text,
+          });
+          setStep("email");
+        } catch (e) { setError("Errore nella generazione email."); }
+        setLoading(false);
+      };
+
+      const openGmail = () => {
+        const to = encodeURIComponent(dirForm.email);
+        const subject = encodeURIComponent(email.subject);
+        const body = encodeURIComponent(email.body);
+        window.open(`https://mail.google.com/mail/?view=cm&to=${to}&su=${subject}&body=${body}`, "_blank");
+      };
+
+      const copyEmail = () => {
+        navigator.clipboard.writeText(`Oggetto: ${email.subject}\n\n${email.body}`);
+        setCopied(true); setTimeout(() => setCopied(false), 2000);
+      };
+
+      const reset = () => { setInput(""); setFile(null); setFileName(""); setExtracted(null); setEmail(null); setStep("input"); setError(null); };
+
+      const s = {
+        wrap: { fontFamily: "Inter,sans-serif", background: "linear-gradient(135deg,#f0f4ff,#fafafa)", minHeight: "100vh", padding: "20px 16px" },
+        card: { background: "#fff", borderRadius: 16, padding: 22, boxShadow: "0 2px 16px rgba(0,0,0,.06)", marginBottom: 16 },
+        header: { background: "linear-gradient(135deg,#2563eb,#1d4ed8)", borderRadius: 16, padding: "18px 22px", marginBottom: 16, color: "#fff" },
+        label: { display: "block", fontSize: 11, fontWeight: 700, color: "#6b7280", marginBottom: 5, textTransform: "uppercase", letterSpacing: ".04em" },
+        inp: { width: "100%", borderRadius: 8, border: "1px solid #e5e7eb", padding: "9px 12px", fontSize: 13, outline: "none" },
+        btn: (bg, color="#fff") => ({ background: bg, color, border: "none", borderRadius: 10, padding: "11px 14px", fontSize: 13, fontWeight: 700, cursor: "pointer", width: "100%" }),
+        row: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 },
+        err: { background: "#fef2f2", border: "1px solid #fecaca", color: "#dc2626", borderRadius: 8, padding: "9px 12px", fontSize: 13, marginBottom: 12 },
+      };
+
+      const Field = ({ label, val, name }) => (
+        <div style={{ marginBottom: 12 }}>
+          <label style={s.label}>{label}</label>
+          <input style={s.inp} value={val || ""} onChange={e => setExtracted(p => ({ ...p, [name]: e.target.value }))} />
+        </div>
+      );
+
+      return (
+        <div style={s.wrap}>
+          <div style={{ maxWidth: 560, margin: "0 auto" }}>
+            <div style={s.header}>
+              <div style={{ fontSize: 21, fontWeight: 800 }}>📄 Agente Fatture AI</div>
+              <div style={{ fontSize: 12, opacity: .85, marginTop: 3 }}>Incolla testo, PDF o immagine — l'AI estrae tutto automaticamente</div>
+            </div>
+
+            <div style={{ display: "flex", gap: 8, marginBottom: 16 }}>
+              {[["1","Input"],["2","Revisione"],["3","Email"]].map(([n, lbl], i) => {
+                const active = step === ["input","review","email"][i];
+                const done = (step==="review"&&i===0)||(step==="email"&&i<2);
+                return (
+                  <div key={n} style={{ flex:1, textAlign:"center", background: done?"#dcfce7":active?"#dbeafe":"#f1f5f9", borderRadius:8, padding:"7px 4px" }}>
+                    <div style={{ fontSize:11, fontWeight:700, color: done?"#16a34a":active?"#2563eb":"#94a3b8" }}>{done?"✓":n} {lbl}</div>
+                  </div>
+                );
+              })}
+            </div>
+
+            {step === "input" && (
+              <div style={s.card}>
+                <div style={{ fontSize:13, fontWeight:700, color:"#1e293b", marginBottom:12 }}>👤 Dati del Direttore</div>
+                <div style={{ ...s.row, marginBottom:18 }}>
+                  <div><label style={s.label}>Nome *</label><input style={s.inp} value={dirForm.nome} onChange={e=>setDirForm(p=>({...p,nome:e.target.value}))} /></div>
+                  <div><label style={s.label}>Email</label><input style={s.inp} value={dirForm.email} onChange={e=>setDirForm(p=>({...p,email:e.target.value}))} /></div>
+                </div>
+                <div style={{ fontSize:13, fontWeight:700, color:"#1e293b", marginBottom:12 }}>📋 Dati Fornitore</div>
+                <textarea style={{ ...s.inp, minHeight:90, resize:"vertical", marginBottom:10 }} value={input}
+                  onChange={e=>{ setInput(e.target.value); if(e.target.value){setFile(null);setFileName("");} }}
+                  placeholder='Testo libero: "De Pace Impianti Srl, via Capozzi 20 Taranto, P.IVA 02788830733, SDI krrh6b9"'
+                  disabled={!!file} />
+                <div style={{ display:"flex", alignItems:"center", gap:10, marginBottom:14 }}>
+                  <div style={{ flex:1, height:1, background:"#e5e7eb" }}/><span style={{ fontSize:12, color:"#94a3b8", fontWeight:600 }}>oppure</span><div style={{ flex:1, height:1, background:"#e5e7eb" }}/>
+                </div>
+                <div onClick={()=>fileRef.current.click()} style={{ border:"2px dashed #bfdbfe", borderRadius:10, padding:16, textAlign:"center", cursor:"pointer", background:file?"#f0fdf4":"#f8faff", marginBottom:14 }}>
+                  {fileName ? <><div style={{fontSize:22}}>✅</div><div style={{fontSize:13,color:"#16a34a",fontWeight:600}}>{fileName}</div></>
+                    : <><div style={{fontSize:22}}>📎</div><div style={{fontSize:13,color:"#2563eb",fontWeight:600}}>Carica PDF o immagine</div></>}
+                </div>
+                <input ref={fileRef} type="file" accept="image/*,.pdf" style={{display:"none"}} onChange={handleFile} />
+                {error && <div style={s.err}>⚠️ {error}</div>}
+                <button style={s.btn(loading?"#93c5fd":"linear-gradient(135deg,#2563eb,#1d4ed8)")} onClick={extractData} disabled={loading}>
+                  {loading?"⏳ Estrazione...":"🔍 Estrai Dati con AI"}
+                </button>
+              </div>
+            )}
+
+            {step === "review" && extracted && (
+              <div style={s.card}>
+                <div style={{ fontSize:13, fontWeight:700, color:"#1e293b", marginBottom:16 }}>✏️ Verifica i dati estratti</div>
+                <Field label="Ragione Sociale" val={extracted.ragione_sociale} name="ragione_sociale" />
+                <Field label="Indirizzo" val={extracted.indirizzo} name="indirizzo" />
+                <div style={s.row}>
+                  <Field label="P.IVA / CF" val={extracted.piva_cf} name="piva_cf" />
+                  <Field label="Codice SDI" val={extracted.codice_sdi} name="codice_sdi" />
+                </div>
+                <Field label="PEC" val={extracted.pec} name="pec" />
+                <Field label="Importo / Note" val={extracted.note} name="note" />
+                {error && <div style={s.err}>⚠️ {error}</div>}
+                <div style={{ display:"grid", gridTemplateColumns:"1fr 2fr", gap:10 }}>
+                  <button style={s.btn("#f1f5f9","#475569")} onClick={()=>setStep("input")}>← Indietro</button>
+                  <button style={s.btn(loading?"#93c5fd":"linear-gradient(135deg,#2563eb,#1d4ed8)")} onClick={generateEmail} disabled={loading}>
+                    {loading?"⏳ Generazione...":"✉️ Genera Email"}
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {step === "email" && email && (
+              <div style={s.card}>
+                <div style={{ fontSize:13, fontWeight:700, color:"#1e293b", marginBottom:14 }}>✅ Email Pronta</div>
+                <div style={{ background:"#f8fafc", borderRadius:10, padding:14, marginBottom:12, border:"1px solid #e2e8f0" }}>
+                  <div style={{ fontSize:10, fontWeight:700, color:"#64748b", marginBottom:4, textTransform:"uppercase" }}>Oggetto</div>
+                  <div style={{ fontSize:14, fontWeight:600, color:"#1e293b" }}>{email.subject}</div>
+                </div>
+                <div style={{ background:"#f8fafc", borderRadius:10, padding:14, marginBottom:18, border:"1px solid #e2e8f0", maxHeight:280, overflowY:"auto" }}>
+                  <div style={{ fontSize:10, fontWeight:700, color:"#64748b", marginBottom:6, textTransform:"uppercase" }}>Corpo</div>
+                  <div style={{ fontSize:13, color:"#334155", whiteSpace:"pre-wrap", lineHeight:1.7 }}>{email.body}</div>
+                </div>
+                <div style={{ display:"grid", gridTemplateColumns:"1fr 1fr 1fr", gap:8 }}>
+                  <button style={s.btn("linear-gradient(135deg,#dc2626,#b91c1c)")} onClick={openGmail}>📧 Gmail</button>
+                  <button style={s.btn(copied?"#16a34a":"linear-gradient(135deg,#475569,#334155)")} onClick={copyEmail}>{copied?"✅ Copiato":"📋 Copia"}</button>
+                  <button style={s.btn("#f1f5f9","#475569")} onClick={reset}>🔄 Nuova</button>
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      );
+    }
+
+    ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+  </script>
+</body>
+</html>
